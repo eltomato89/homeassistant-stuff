@@ -1,0 +1,147 @@
+blueprint:
+  name: CO2 Presence RGB Warning Light
+  description: >
+    Steuert ein RGB-Licht basierend auf CO2-Wert und Präsenz.
+    - Licht NUR an, wenn TruePresence = an
+    - Ab CO2-Schwelle wird das Licht stufenlos röter & heller
+  domain: automation
+
+  input:
+    co2_sensor:
+      name: CO2 Sensor
+      description: Sensor mit CO2-Wert in ppm
+      selector:
+        entity:
+          domain: sensor
+    presence_sensor:
+      name: Präsenzsensor
+      description: TruePresence / Präsenz-Binary-Sensor
+      selector:
+        entity:
+          domain: binary_sensor
+    target_light:
+      name: RGB-Licht
+      description: RGB- oder RGBW-Licht
+      selector:
+        entity:
+          domain: light
+
+    co2_min:
+      name: Untere CO2-Schwelle (ppm)
+      description: Unterhalb dieses Werts bleibt das Licht aus
+      default: 800
+      selector:
+        number:
+          min: 400
+          max: 2000
+          step: 50
+          mode: box
+
+    co2_max:
+      name: Obere CO2-Schwelle (ppm)
+      description: Ab diesem Wert ist Licht max. rot & hell
+      default: 2000
+      selector:
+        number:
+          min: 1000
+          max: 3000
+          step: 50
+          mode: box
+
+    min_brightness:
+      name: Minimale Helligkeit (%)
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          mode: slider
+
+    max_brightness:
+      name: Maximale Helligkeit (%)
+      default: 100
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          mode: slider
+
+mode: restart
+
+trigger:
+  - platform: state
+    entity_id: !input co2_sensor
+  - platform: state
+    entity_id: !input presence_sensor
+
+variables:
+  co2_entity: !input co2_sensor
+  presence_entity: !input presence_sensor
+  co2_min_input: !input co2_min
+  co2_max_input: !input co2_max
+  min_brightness_input: !input min_brightness
+  max_brightness_input: !input max_brightness
+
+  co2: "{{ states(co2_entity) | float(0) }}"
+  co2_min_val: "{{ co2_min_input | float(800) }}"
+  co2_max_val: "{{ co2_max_input | float(2000) }}"
+  min_brightness_val: "{{ min_brightness_input | float(20) }}"
+  max_brightness_val: "{{ max_brightness_input | float(100) }}"
+
+  factor: >-
+    {% set cmin = co2_min_val %}
+    {% set cmax = co2_max_val %}
+    {% if cmax <= cmin %}
+      0
+    {% else %}
+      {% set f = (co2 - cmin) / (cmax - cmin) %}
+      {{ [0, [f, 1] | min] | max }}
+    {% endif %}
+
+  # Hue 120 (grün) -> 0 (rot)
+  hue: "{{ 120 - (120 * factor) }}"
+  brightness_pct: "{{ min_brightness_val + (max_brightness_val - min_brightness_val) * factor }}"
+
+action:
+  - choose:
+      # FALL 1: Keine Präsenz → Licht aus
+      - conditions:
+          - condition: state
+            entity_id: !input presence_sensor
+            state: "off"
+        sequence:
+          - service: light.turn_off
+            target:
+              entity_id: !input target_light
+
+      # FALL 2: Präsenz vorhanden
+      - conditions:
+          - condition: state
+            entity_id: !input presence_sensor
+            state: "on"
+        sequence:
+          - choose:
+              # CO2 unter Untergrenze → Licht aus
+              - conditions:
+                  - condition: template
+                    value_template: "{{ co2 < co2_min_val }}"
+                sequence:
+                  - service: light.turn_off
+                    target:
+                      entity_id: !input target_light
+
+              # CO2 über Untergrenze → Licht abhängig vom Wert steuern
+              - conditions:
+                  - condition: template
+                    value_template: "{{ co2 >= co2_min_val }}"
+                sequence:
+                  - service: light.turn_on
+                    target:
+                      entity_id: !input target_light
+                    data:
+                      hs_color:
+                        - "{{ hue }}"
+                        - 100
+                      brightness_pct: "{{ brightness_pct | round(0) }}"
