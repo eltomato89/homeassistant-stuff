@@ -1,8 +1,8 @@
 blueprint:
-  name: CO2 Presence RGB Warning Light (Stable)
+  name: CO2 Presence RGB Warning Light (Stable & Fixed)
   description: >
-    Stufenlose CO2-Warnbeleuchtung, nur wenn Präsenz erkannt wird.
-    Kein Flackern oder hartes Aus-/Einschalten.
+    RGB-Licht, das nur bei Präsenz stufenlos röter/heller wird,
+    abhängig vom CO2-Wert. Kein Flackern, keine unnötigen Updates.
   domain: automation
 
   input:
@@ -65,15 +65,21 @@ trigger:
     entity_id: !input presence_sensor
 
 variables:
-  co2: "{{ states( !input co2_sensor ) | float(0) }}"
-  presence: "{{ is_state( !input presence_sensor, 'on') }}"
+  # YAML Variable → Template darf das nutzen
+  co2_entity: !input co2_sensor
+  presence_entity: !input presence_sensor
+  light: !input target_light
+
   co2_min_val: !input co2_min
   co2_max_val: !input co2_max
   min_brightness_val: !input min_brightness
   max_brightness_val: !input max_brightness
-  light: !input target_light
 
-  # Faktor 0–1 (nur gültig bei co2 >= co2_min)
+  # Werte aus dem System lesen
+  co2: "{{ states(co2_entity) | float(0) }}"
+  presence: "{{ is_state(presence_entity, 'on') }}"
+
+  # 0–1 Skala
   factor: >-
     {% if co2 < co2_min_val %}
       0
@@ -83,10 +89,12 @@ variables:
       {{ (co2 - co2_min_val) / (co2_max_val - co2_min_val) }}
     {% endif %}
 
+  # Zielwerte
   target_hue: "{{ 120 - (120 * factor) }}"
-  target_brightness: "{{ (min_brightness_val + factor * (max_brightness_val - min_brightness_val)) | round(0) }}"
+  target_brightness: >
+    {{ (min_brightness_val + factor * (max_brightness_val - min_brightness_val)) | round(0) }}
 
-  # Aktuelle Werte
+  # Aktuelle Werte lesen
   current_brightness: "{{ (state_attr(light, 'brightness') or 0) | int }}"
   current_brightness_pct: "{{ (current_brightness / 255 * 100) | round(0) }}"
   current_hue: "{{ state_attr(light, 'hs_color')[0] if state_attr(light, 'hs_color') else 0 }}"
@@ -94,7 +102,7 @@ variables:
 action:
   - choose:
 
-      # 1) Präsenz aus → Licht komplett aus
+      # 1) Präsenz aus → Licht aus
       - conditions: "{{ not presence }}"
         sequence:
           - service: light.turn_off
@@ -105,7 +113,7 @@ action:
       - conditions: "{{ presence }}"
         sequence:
 
-          # 2a) CO2 unter Schwellwert → Licht AUS
+          # 2a) CO₂ unter Untergrenze → AUS
           - choose:
               - conditions: "{{ co2 < co2_min_val }}"
                 sequence:
@@ -113,15 +121,17 @@ action:
                     target:
                       entity_id: !input target_light
 
-          # 2b) CO2 >= Min → Helligkeit/Farbe nur ändern, wenn nötig
+          # 2b) CO₂ >= Untergrenze → nur ändern, wenn nötig
           - condition: template
             value_template: "{{ co2 >= co2_min_val }}"
 
+          # prüfen, ob Änderung nötig ist
           - condition: template
             value_template: >
               {{ (current_brightness_pct | int != target_brightness | int)
                  or ((current_hue | float) | round(1) != (target_hue | float) | round(1)) }}
 
+          # Änderung senden
           - service: light.turn_on
             target:
               entity_id: !input target_light
